@@ -551,6 +551,52 @@ let activityLog = [];
 let attendance = {};
 let attDates = []; // sorted date strings
 
+const STORAGE_KEY = 'soarChallenge_v2';
+
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      teams: TEAMS.map(t => ({ id: t.id, points: t.points, roster: [...t.roster] })),
+      rosterDetails: { ...ROSTER_DETAILS },
+      activityLog: activityLog.map(e => ({ ...e, time: e.time instanceof Date ? e.time.toISOString() : e.time })),
+      attendance,
+      attDates
+    }));
+  } catch (err) {
+    console.warn('Could not save data to localStorage:', err);
+  }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (Array.isArray(data.teams)) {
+      data.teams.forEach(saved => {
+        const team = getTeamById(saved.id);
+        if (!team) return;
+        if (typeof saved.points === 'number') team.points = saved.points;
+        if (Array.isArray(saved.roster)) team.roster = saved.roster;
+      });
+    }
+    if (data.rosterDetails && typeof data.rosterDetails === 'object') {
+      Object.keys(ROSTER_DETAILS).forEach(k => delete ROSTER_DETAILS[k]);
+      Object.assign(ROSTER_DETAILS, data.rosterDetails);
+    }
+    if (Array.isArray(data.activityLog)) {
+      activityLog = data.activityLog.map(e => ({
+        ...e,
+        time: new Date(e.time)
+      }));
+    }
+    if (data.attendance && typeof data.attendance === 'object') attendance = data.attendance;
+    if (Array.isArray(data.attDates)) attDates = data.attDates;
+  } catch (err) {
+    console.warn('Could not load data from localStorage:', err);
+  }
+}
+
 // ─── HELPERS ────────────────────────────────────────────────────────
 function getTeamById(id){ return TEAMS.find(t=>t.id===id); }
 function getMaxPts(){ return Math.max(...TEAMS.map(t=>t.points),1); }
@@ -597,7 +643,7 @@ function resetAll(){
   renderAll();
 }
 
-function clearLog(){ activityLog=[]; renderLog(); }
+function clearLog(){ activityLog=[]; renderLog(); saveState(); }
 
 // ─── ATTENDANCE ──────────────────────────────────────────────────────
 function todayStr(){
@@ -613,11 +659,13 @@ function addDate(){
     attDates.sort();
   }
   renderAttendance();
+  saveState();
 }
 
 function removeDate(d){
   attDates = attDates.filter(x=>x!==d);
   renderAttendance();
+  saveState();
 }
 
 function resetAttendance(){
@@ -625,6 +673,7 @@ function resetAttendance(){
   attendance={};
   attDates=[];
   renderAttendance();
+  saveState();
 }
 
 // Points awarded/reversed per attendance status transition
@@ -935,6 +984,7 @@ function renderAll(){
   renderTeams();
   renderAttendance();
   renderLog();
+  saveState();
 }
 
 function highlightTeam(id){
@@ -951,6 +1001,7 @@ function highlightTeam(id){
 
 // init date input to today
 document.getElementById('att-date-input').value = todayStr();
+loadState();
 renderAll();
 </script>
 </body>
