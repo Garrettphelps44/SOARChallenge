@@ -1,0 +1,10 @@
+# Static site — single HTML file, no build step
+[build]
+  publish = "."
+  command = ""
+
+# Old filename on GitHub → home page
+[[redirects]]
+  from = "/soar-tracker_v2.html"
+  to = "/"
+  status = 301
