@@ -404,6 +404,7 @@
 
 <div class="toast" id="toast"><span id="toast-text"></span></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // ─── DATA ───────────────────────────────────────────────────────────
 const TEAMS = [
@@ -553,49 +554,145 @@ let attendance = {};
 let attDates = []; // sorted date strings
 
 const STORAGE_KEY = 'soarChallenge_v2';
+const SUPABASE_URL = 'https://vlvmrymjiqloazvxqtwn.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsdm1yeW1qaXFsb2F6dnhxdHduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk4MjEzOTEsImV4cCI6MjA5NTM5NzM5MX0.HZhwCn0d-4pEJfdvBGM-Ga_41VVDZ5cPPvoi_Xru1r4';
 
-function saveState() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      teams: TEAMS.map(t => ({ id: t.id, points: t.points, roster: [...t.roster] })),
-      rosterDetails: { ...ROSTER_DETAILS },
-      activityLog: activityLog.map(e => ({ ...e, time: e.time instanceof Date ? e.time.toISOString() : e.time })),
-      attendance,
-      attDates
+let supabaseClient = null;
+let saveTimer = null;
+let ignoreRealtimeUntil = 0;
+let applyingRemote = false;
+
+function buildStatePayload() {
+  return {
+    teams: TEAMS.map(t => ({ id: t.id, points: t.points, roster: [...t.roster] })),
+    rosterDetails: { ...ROSTER_DETAILS },
+    activityLog: activityLog.map(e => ({
+      ...e,
+      time: e.time instanceof Date ? e.time.toISOString() : e.time
+    })),
+    attendance,
+    attDates
+  };
+}
+
+function applyStateData(data) {
+  if (!data || typeof data !== 'object') return;
+  if (Array.isArray(data.teams)) {
+    data.teams.forEach(saved => {
+      const team = getTeamById(saved.id);
+      if (!team) return;
+      if (typeof saved.points === 'number') team.points = saved.points;
+      if (Array.isArray(saved.roster)) team.roster = saved.roster;
+    });
+  }
+  if (data.rosterDetails && typeof data.rosterDetails === 'object') {
+    Object.keys(ROSTER_DETAILS).forEach(k => delete ROSTER_DETAILS[k]);
+    Object.assign(ROSTER_DETAILS, data.rosterDetails);
+  }
+  if (Array.isArray(data.activityLog)) {
+    activityLog = data.activityLog.map(e => ({
+      ...e,
+      time: new Date(e.time)
     }));
+  }
+  if (data.attendance && typeof data.attendance === 'object') attendance = data.attendance;
+  if (Array.isArray(data.attDates)) attDates = data.attDates;
+}
+
+function loadStateFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    applyStateData(JSON.parse(raw));
+    return true;
+  } catch (err) {
+    console.warn('Could not load data from localStorage:', err);
+    return false;
+  }
+}
+
+function saveStateToLocalStorage() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(buildStatePayload()));
   } catch (err) {
     console.warn('Could not save data to localStorage:', err);
   }
 }
 
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    if (Array.isArray(data.teams)) {
-      data.teams.forEach(saved => {
-        const team = getTeamById(saved.id);
-        if (!team) return;
-        if (typeof saved.points === 'number') team.points = saved.points;
-        if (Array.isArray(saved.roster)) team.roster = saved.roster;
-      });
-    }
-    if (data.rosterDetails && typeof data.rosterDetails === 'object') {
-      Object.keys(ROSTER_DETAILS).forEach(k => delete ROSTER_DETAILS[k]);
-      Object.assign(ROSTER_DETAILS, data.rosterDetails);
-    }
-    if (Array.isArray(data.activityLog)) {
-      activityLog = data.activityLog.map(e => ({
-        ...e,
-        time: new Date(e.time)
-      }));
-    }
-    if (data.attendance && typeof data.attendance === 'object') attendance = data.attendance;
-    if (Array.isArray(data.attDates)) attDates = data.attDates;
-  } catch (err) {
-    console.warn('Could not load data from localStorage:', err);
+async function saveStateNow() {
+  if (!supabaseClient || applyingRemote) return;
+  const payload = buildStatePayload();
+  saveStateToLocalStorage();
+  ignoreRealtimeUntil = Date.now() + 2000;
+  const { error } = await supabaseClient
+    .from('soar_app_state')
+    .upsert({ id: 'main', data: payload, updated_at: new Date().toISOString() });
+  if (error) console.warn('Could not save to Supabase:', error);
+}
+
+function saveState() {
+  if (!supabaseClient || applyingRemote) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { saveStateNow(); }, 400);
+}
+
+async function loadState() {
+  if (!supabaseClient) return;
+  const { data: row, error } = await supabaseClient
+    .from('soar_app_state')
+    .select('data')
+    .eq('id', 'main')
+    .maybeSingle();
+
+  if (error) {
+    console.warn('Could not load from Supabase:', error);
+    loadStateFromLocalStorage();
+    return;
   }
+
+  const cloud = row?.data;
+  const hasCloudData = cloud && (
+    (Array.isArray(cloud.teams) && cloud.teams.some(t => t.points !== 0 || (t.roster && t.roster.length > 0))) ||
+    (Array.isArray(cloud.activityLog) && cloud.activityLog.length > 0) ||
+    (cloud.attendance && Object.keys(cloud.attendance).length > 0) ||
+    (Array.isArray(cloud.attDates) && cloud.attDates.length > 0)
+  );
+
+  if (hasCloudData) {
+    applyStateData(cloud);
+    return;
+  }
+
+  if (loadStateFromLocalStorage()) {
+    await saveStateNow();
+  }
+}
+
+function subscribeToRemoteUpdates() {
+  supabaseClient
+    .channel('soar-state-live')
+    .on('postgres_changes', {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'soar_app_state',
+      filter: 'id=eq.main'
+    }, (payload) => {
+      if (Date.now() < ignoreRealtimeUntil) return;
+      if (!payload.new?.data) return;
+      applyingRemote = true;
+      applyStateData(payload.new.data);
+      renderAll(false);
+      applyingRemote = false;
+    })
+    .subscribe();
+}
+
+async function initApp() {
+  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  await loadState();
+  subscribeToRemoteUpdates();
+  renderAll(false);
+  await saveStateNow();
 }
 
 // ─── HELPERS ────────────────────────────────────────────────────────
@@ -980,12 +1077,12 @@ function renderLog(){
   }).join('');
 }
 
-function renderAll(){
+function renderAll(persist = true){
   renderLeaderboard();
   renderTeams();
   renderAttendance();
   renderLog();
-  saveState();
+  if (persist) saveState();
 }
 
 function highlightTeam(id){
@@ -1002,8 +1099,7 @@ function highlightTeam(id){
 
 // init date input to today
 document.getElementById('att-date-input').value = todayStr();
-loadState();
-renderAll();
+initApp();
 </script>
 </body>
 </html>
